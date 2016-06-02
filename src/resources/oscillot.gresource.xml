@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/colinkinloch/oscillot/">
+    <file compressed="true">gtk/menus.ui</file>
+    <file compressed="true">ui/oscillot.ui</file>
+    <file compressed="true">ui/oscillot.css</file>
+    <file compressed="true">shaders/scope.glslv</file>
+    <file compressed="true">shaders/scope.glslf</file>
+  </gresource>
+</gresources>
