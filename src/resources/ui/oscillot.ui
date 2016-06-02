@@ -85,7 +85,7 @@
               <object class="GtkToggleButton">
                 <property name="visible">True</property>
                 <property name="action-name">win.reverse</property>
-                <property name="action-target">false</property>
+                <property name="action-target">true</property>
                 <child>
                   <object class="GtkImage">
                     <property name="visible">True</property>
@@ -98,7 +98,7 @@
               <object class="GtkToggleButton">
                 <property name="visible">True</property>
                 <property name="action-name">win.reverse</property>
-                <property name="action-target">true</property>
+                <property name="action-target">false</property>
                 <child>
                   <object class="GtkImage">
                     <property name="visible">True</property>
@@ -110,8 +110,10 @@
           </object>
         </child>
         <child>
-          <object class="GtkToggleButton">
+          <object class="GtkToggleButton" id="cycle-button">
             <property name="visible">True</property>
+            <property name="action-name">win.cycle</property>
+            <property name="action-target">true</property>
             <child>
               <object class="GtkImage">
                 <property name="visible">True</property>

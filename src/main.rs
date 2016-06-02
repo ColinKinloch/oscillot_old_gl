@@ -1,5 +1,3 @@
-#![feature(deque_extras)]
-
 extern crate jack;
 
 extern crate glib;
@@ -14,8 +12,6 @@ extern crate shared_library;
 
 use std::sync::{Arc,Mutex};
 
-use std::slice::IterMut;
-use std::collections::VecDeque;
 use jack::{JackClient,JackPort,JackNframesT};
 
 use gtk::prelude::*;
@@ -34,13 +30,14 @@ const RESOURCE_BYTES: &'static [u8] = include_bytes!("resources/oscillot.gresour
 
 struct CallbackData {
   capture: JackPort,
-  samples: Arc<Mutex<VecDeque<f32>>>,
+  samples: Arc<Mutex<Vec<f32>>>,
   write_cursor: usize,
   samples_outdated: bool,
   length: usize,
   skip: usize,
   record: bool,
   reverse: bool,
+  cycle: bool,
   gain: f32
 }
 
@@ -84,13 +81,14 @@ fn main() {
   let data = Arc::new(Mutex::new(CallbackData {
     //client: client,
     capture: capture,
-    samples: Arc::new(Mutex::new(VecDeque::with_capacity(1024))),
+    samples: Arc::new(Mutex::new(Vec::with_capacity(1024))),
     write_cursor: 0,
     samples_outdated: false,
     length: 1024,
     skip: 1,
     record: true,
     reverse: false,
+    cycle: false,
     gain: 1.0
   }));
 
@@ -126,8 +124,10 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   css.load_from_resource("/org/colinkinloch/oscillot/ui/oscillot.css");
 
   style_context.add_provider(&css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-  let reverse_action = gio::SimpleAction::new_stateful("reverse", Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(true));
+  let reverse_action = gio::SimpleAction::new_stateful("reverse", Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
+  let cycle_action = gio::SimpleAction::new_stateful("cycle", Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
   win.add_action(&reverse_action);
+  win.add_action(&cycle_action);
 
   let about_dialog = builder.get_object::<gtk::AboutDialog>("about-dialog")
     .expect("Cannot get about dialog.");
@@ -187,15 +187,17 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   }
   {
     let gl_area = gl_area.clone();
+    let style_context = style_context.clone();
     alpha_slider.connect_value_changed(move |adj| {
       let v = adj.get_value() as f32;
       gl_area.make_current(); 
       unsafe { gl::ClearColor(0.0, 0.0, 0.0, v) };
       if 1.0 == v {
         gl_area.set_has_alpha(false);
-        //css.get_style("");
+        style_context.remove_class("transparent");
       } else {
         gl_area.set_has_alpha(true);
+        style_context.add_class("transparent");
       }
     });
   }
@@ -212,6 +214,16 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
         Some(state) => state,
         None => false
       };
+    });
+  }
+  {
+    let data = data.clone();
+    let cycle_button = builder.get_object::<gtk::ToggleButton>("cycle-button")
+      .expect("Cannot get cycle button!");
+    cycle_action.connect_activate(move |action, state| {
+      let cycle = cycle_button.get_active();
+      let mut data = data.lock().unwrap();
+      data.cycle = cycle;
     });
   }
 
@@ -280,9 +292,20 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
 
       let mut data = data.lock().unwrap();
       let samples = data.samples.clone();
-      let mut verts = {
-        let mut verts = Vec::from((*(samples.lock().unwrap())).clone());
-        if data.reverse { verts.reverse() }
+      let verts = {
+        let mut verts = Vec::new();//Vec::from((*(samples.lock().unwrap())).clone());
+        if data.cycle {
+          verts = samples.lock().unwrap().clone();
+        } else {
+          let v = samples.lock().unwrap().clone();
+          if (data.write_cursor / data.skip) as usize >= v.len() {
+            data.write_cursor = 0;
+          }
+          let (v1, v2) = v.split_at((data.write_cursor / data.skip) as usize);
+          verts.extend_from_slice(v2);
+          verts.extend_from_slice(v1);
+        }
+        if data.reverse { verts.reverse() };
         verts
       };
 
@@ -343,7 +366,10 @@ fn process(frames: JackNframesT, data: *mut CallbackData) -> isize {
       if (data.write_cursor / data.skip) as usize >= samples.len() {
         data.write_cursor = 0;
       }
-      *samples.get_mut((data.write_cursor / data.skip) as usize).unwrap() = v * data.gain;
+      match samples.get_mut((data.write_cursor / data.skip) as usize) {
+        Some(sample) => *sample = v * data.gain,
+        None => {}
+      }
       data.write_cursor = 1 + data.write_cursor;
     }
   }
