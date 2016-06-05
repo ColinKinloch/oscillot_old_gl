@@ -61,9 +61,24 @@
               </object>
             </child>
             <child>
+              <object class="GtkToggleButton" id="cycle-toggle">
+                <property name="visible">True</property>
+                <property name="action-name">win.cycle</property>
+                <property name="action-target">true</property>
+                <child>
+                  <object class="GtkImage">
+                    <property name="visible">True</property>
+                    <property name="icon-name">media-playlist-repeat-symbolic</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child>
               <object class="GtkToggleButton" id="fullscreen-toggle">
                 <property name="visible">True</property>
                 <property name="active">False</property>
+                <property name="action-name">win.fullscreen</property>
+                <property name="action-target">true</property>
                 <child>
                   <object class="GtkImage">
                     <property name="visible">True</property>
@@ -105,19 +120,6 @@
                     <property name="icon-name">go-next-symbolic</property>
                   </object>
                 </child>
-              </object>
-            </child>
-          </object>
-        </child>
-        <child>
-          <object class="GtkToggleButton" id="cycle-button">
-            <property name="visible">True</property>
-            <property name="action-name">win.cycle</property>
-            <property name="action-target">true</property>
-            <child>
-              <object class="GtkImage">
-                <property name="visible">True</property>
-                <property name="icon-name">media-playlist-repeat-symbolic</property>
               </object>
             </child>
           </object>

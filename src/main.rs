@@ -122,12 +122,17 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
     .expect("Cannot get style context!");
   let css = gtk::CssProvider::new();
   css.load_from_resource("/org/colinkinloch/oscillot/ui/oscillot.css");
-
   style_context.add_provider(&css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-  let reverse_action = gio::SimpleAction::new_stateful("reverse", Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
-  let cycle_action = gio::SimpleAction::new_stateful("cycle", Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
+
+  let reverse_action = gio::SimpleAction::new_stateful("reverse",
+    Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
+  let cycle_action = gio::SimpleAction::new_stateful("cycle",
+    Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
+  let fullscreen_action = gio::SimpleAction::new_stateful("fullscreen",
+    Some(glib::VariantTy::new("b").unwrap()), &glib::Variant::from(false));
   win.add_action(&reverse_action);
   win.add_action(&cycle_action);
+  win.add_action(&fullscreen_action);
 
   let about_dialog = builder.get_object::<gtk::AboutDialog>("about-dialog")
     .expect("Cannot get about dialog.");
@@ -157,11 +162,6 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
       data.record = record_toggle.get_active();
     });
   }
-  /*{
-    let data = data.lock().unwrap();
-    sample_length_spin.set_value(data.length as f64);
-    sample_skip_spin.set_value(data.skip as f64);
-  }*/
   {
     let data = data.clone();
     sample_skip_spin.connect_value_changed(move |adj| {
@@ -218,12 +218,25 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   }
   {
     let data = data.clone();
-    let cycle_button = builder.get_object::<gtk::ToggleButton>("cycle-button")
+    let cycle_button = builder.get_object::<gtk::ToggleButton>("cycle-toggle")
       .expect("Cannot get cycle button!");
-    cycle_action.connect_activate(move |action, state| {
+    cycle_action.connect_activate(move |_action, _state| {
       let cycle = cycle_button.get_active();
       let mut data = data.lock().unwrap();
       data.cycle = cycle;
+    });
+  }
+  {
+    let fullscreen_button = builder.get_object::<gtk::ToggleButton>("fullscreen-toggle")
+      .expect("Cannot get fullscreen button!");
+    let win = win.clone();
+    fullscreen_action.connect_activate(move |_action, _state| {
+      let fullscreen = fullscreen_button.get_active();
+      if fullscreen {
+        win.fullscreen();
+      } else {
+        win.unfullscreen();
+      }
     });
   }
 
@@ -253,8 +266,10 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
 
       // TODO Fail good!
       *scope_program = create_program(vec![
-        create_shader_for_resource("/org/colinkinloch/oscillot/shaders/scope.glslv", gl::VERTEX_SHADER).unwrap(),
-        create_shader_for_resource("/org/colinkinloch/oscillot/shaders/scope.glslf", gl::FRAGMENT_SHADER).unwrap()
+        create_shader_for_resource("/org/colinkinloch/oscillot/shaders/scope.glslv", gl::VERTEX_SHADER)
+          .expect("Cannot create Vertex Shader"),
+        create_shader_for_resource("/org/colinkinloch/oscillot/shaders/scope.glslf", gl::FRAGMENT_SHADER)
+          .expect("Cannot create Fragment Shader")
       ]).expect("Cannot create program!");
 
       unsafe {
@@ -272,23 +287,17 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
         gl::EnableVertexAttribArray(*scope_amp_attr as GLuint);
         gl::VertexAttribPointer(*scope_amp_attr as GLuint, 1, epoxy::FLOAT,
           epoxy::FALSE as GLboolean, mem::size_of::<f32>() as GLint, ptr::null());
+
+        gl::UseProgram(*scope_program);
       }
     });
   }
 
   {
-    let scope_vbuffer = scope_vbuffer.clone();
-    let scope_varray = scope_varray.clone();
-    let scope_amp_attr = scope_amp_attr.clone();
     let scope_len_uni = scope_len_uni.clone();
-    let scope_program = scope_program.clone();
     let data = data.clone();
-    gl_area.connect_render(move |context, _| {
-      let scope_vbuffer = scope_vbuffer.lock().unwrap();
-      let scope_varray = scope_varray.lock().unwrap();
-      let scope_amp_attr = scope_amp_attr.lock().unwrap();
+    gl_area.connect_render(move |gl_area, _| {
       let scope_len_uni = scope_len_uni.lock().unwrap();
-      let scope_program = scope_program.lock().unwrap();
 
       let mut data = data.lock().unwrap();
       let samples = data.samples.clone();
@@ -309,23 +318,18 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
         verts
       };
 
-      context.make_current();
+      gl_area.make_current();
       unsafe {
         gl::Clear(epoxy::COLOR_BUFFER_BIT);
-        gl::UseProgram(*scope_program);
-        gl::BindVertexArray(*scope_varray);
-        gl::BindBuffer(epoxy::ARRAY_BUFFER, *scope_vbuffer);
         // TODO More efficient? Mapped memory?
         if data.samples_outdated {
           gl::BufferData(epoxy::ARRAY_BUFFER, (verts.len() * mem::size_of::<f32>()) as GLsizeiptr,
-          verts.as_ptr() as *const std::os::raw::c_void, epoxy::DYNAMIC_DRAW);
+          verts.as_ptr() as *const std::os::raw::c_void, epoxy::STREAM_DRAW);
           gl::Uniform1i(*scope_len_uni, verts.len() as GLint);
+          data.samples_outdated = false;
         }
-        data.samples_outdated = false;
       
-        gl::EnableVertexAttribArray(*scope_amp_attr as GLuint);
         gl::DrawArrays(epoxy::LINE_STRIP, 0, verts.len() as GLint);
-        gl::DisableVertexAttribArray(*scope_amp_attr as GLuint);
       }
       Inhibit(false)
     });
@@ -341,7 +345,7 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
 
   {
     let gl_area = gl_area.clone();
-    gtk::timeout_add(16, move || {
+    gtk::timeout_add(8, move || {
       gl_area.queue_render();
       glib::Continue(true)
     });
@@ -352,7 +356,7 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   }
 }
 
-fn shutdown(app: &gtk::Application, client: &JackClient) {
+fn shutdown(_app: &gtk::Application, client: &JackClient) {
   client.close();
 }
 
@@ -407,10 +411,10 @@ fn create_shader_for_resource(path: &str, ty: GLenum) -> Result<GLuint, String> 
       gl::GetShaderiv(shader, epoxy::INFO_LOG_LENGTH, &mut len);
       let mut buf = vec![0i8; len as usize];
       gl::GetShaderInfoLog(shader, len, ptr::null_mut(), buf.as_mut_ptr() as *mut GLchar);
-      return Err(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+      Err(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+    } else {
+      Ok(shader)
     }
-
-    Ok(shader)
   }
 }
 
