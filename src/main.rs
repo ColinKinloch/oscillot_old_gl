@@ -1,8 +1,9 @@
 extern crate jack;
 
 extern crate glib;
-extern crate gio;
 extern crate gio_sys;
+extern crate gio;
+extern crate gdk;
 extern crate gtk;
 
 extern crate libc;
@@ -10,10 +11,13 @@ extern crate epoxy;
 extern crate gl;
 extern crate shared_library;
 
+extern crate dft;
+
 use std::sync::{Arc,Mutex};
 
 use jack::{JackClient,JackPort,JackNframesT};
 
+use gdk::prelude::*;
 use gtk::prelude::*;
 
 use std::mem;
@@ -24,9 +28,10 @@ use shared_library::dynamic_library::DynamicLibrary;
 
 static APP_ID: &'static str = "org.colinkinloch.oscillot";
 static APP_PATH: &'static str = "/org/colinkinloch/oscillot";
-static JACK_ID: &'static str = "oscillot";
 
 const RESOURCE_BYTES: &'static [u8] = include_bytes!("resources/oscillot.gresource");
+
+const BLEN: usize = 8192;
 
 struct CallbackData {
   capture: JackPort,
@@ -38,33 +43,30 @@ struct CallbackData {
   record: bool,
   reverse: bool,
   cycle: bool,
-  gain: f32
+  gain: f32,
+  rate: JackNframesT
 }
 
 fn main() {
-  {
-    if gtk::init().is_err() {
-        println!("Failed to initialize GTK.");
-        return;
-    }
-    let bytes = glib::Bytes::from_static(RESOURCE_BYTES);
-    let res = gio::Resource::new_from_data(&bytes)
-      .expect("Bad GResource data.");
-    gio::resources_register(&res);
+  if gtk::init().is_err() {
+    println!("hi");
+    return;
   }
+  let bytes = glib::Bytes::from(&RESOURCE_BYTES);
+  let res = gio::Resource::new_from_data(&bytes).unwrap();
+  gio::resources_register(&res);
 
-  {
-    epoxy::load_with(|s| {
-      match unsafe { DynamicLibrary::open(None).unwrap().symbol(s) } {
-        Ok(v) => v,
-        Err(_) => ptr::null(),
-      }
-    });
-    gl::load_with(|s| epoxy::get_proc_addr(s) as *const std::os::raw::c_void);
-  }
+  epoxy::load_with(|s| {
+    match unsafe { DynamicLibrary::open(None).unwrap().symbol(s) } {
+      Ok(v) => v,
+      Err(_) => ptr::null(),
+    }
+  });
+  gl::load_with(epoxy::get_proc_addr);
 
   let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::empty())
     .expect("Cannot create application.");
+  app.set_resource_base_path(Some(APP_PATH));
 
   let quit_action = gio::SimpleAction::new("quit", None);
   app.add_action(&quit_action);
@@ -73,7 +75,7 @@ fn main() {
     quit_action.connect_activate(move |_, _| app.quit());
   }
 
-  let client = JackClient::open(JACK_ID, jack::JackNoStartServer);
+  let client = JackClient::open(env!("CARGO_PKG_NAME"), jack::JackNoStartServer);
   let capture = client.register_port(
     &"capture", jack::JACK_DEFAULT_AUDIO_TYPE,jack::JackPortIsInput, 0
   );
@@ -81,21 +83,22 @@ fn main() {
   let data = Arc::new(Mutex::new(CallbackData {
     //client: client,
     capture: capture,
-    samples: Arc::new(Mutex::new(Vec::with_capacity(1024))),
+    samples: Arc::new(Mutex::new(Vec::with_capacity(BLEN))),
     write_cursor: 0,
     samples_outdated: false,
-    length: 1024,
+    length: BLEN,
     skip: 1,
     record: true,
     reverse: false,
     cycle: false,
-    gain: 1.0
+    gain: 1.0,
+    rate: client.sample_rate()
   }));
 
   {
     let data = data.lock().unwrap();
     let mut samples = data.samples.lock().unwrap();
-    samples.resize(1024, 0.0);
+    samples.resize(BLEN, 0.0);
   }
 
   app.connect_activate(move |app| activate(app, &client, data.clone()));
@@ -109,10 +112,7 @@ fn main() {
 
 fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<CallbackData>>) {
 
-  let builder = gtk::Builder::new();
-  //builder.set_application(app);
-  builder.add_from_resource("/org/colinkinloch/oscillot/ui/oscillot.ui")
-    .expect("Cannot find ui in resources.");
+  let builder = gtk::Builder::new_from_resource("/org/colinkinloch/oscillot/ui/oscillot.ui");
 
   let win = builder.get_object::<gtk::ApplicationWindow>("scope-window")
     .expect("Cannot get main window.");
@@ -134,73 +134,41 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   win.add_action(&cycle_action);
   win.add_action(&fullscreen_action);
 
+  let background_colour = Arc::new(Mutex::new(gdk::RGBA::black()));
+  let low_colour = Arc::new(Mutex::new(gdk::RGBA::green()));
+  let high_colour = Arc::new(Mutex::new(gdk::RGBA::red()));
+  let colour_outdated = Arc::new(Mutex::new(true));
+
+  let connect_colour_button = |colour: &Arc<Mutex<gdk::RGBA>>, button_id: &str| {
+    let colour_button = builder.get_object::<gtk::ColorButton>(button_id)
+      .expect("Cannot get high colour button");
+    let colour = colour.clone();
+    colour_button.connect_color_set(move |colour_button|
+      *colour.lock().unwrap() = colour_button.get_rgba()
+    );
+  };
+  
+  connect_colour_button(&background_colour, "background-colour-button");
+  connect_colour_button(&low_colour, "low-colour-button");
+  connect_colour_button(&high_colour, "high-colour-button");
+
   let about_dialog = builder.get_object::<gtk::AboutDialog>("about-dialog")
     .expect("Cannot get about dialog.");
-  about_dialog.set_transient_for(Some(&win));
+  about_dialog.set_authors(env!("CARGO_PKG_AUTHORS").split(":").collect::<Vec<&str>>().as_slice());
+  about_dialog.set_program_name(env!("CARGO_PKG_NAME"));
+  about_dialog.set_version(Some(env!("CARGO_PKG_VERSION")));
+  about_dialog.set_website(Some(env!("CARGO_PKG_HOMEPAGE")));
+  about_dialog.set_comments(Some(env!("CARGO_PKG_DESCRIPTION")));
+
   let about_action = gio::SimpleAction::new("about", None);
   app.add_action(&about_action);
   about_action.connect_activate(move |_, _| about_dialog.show() );
 
+  connect_ui_signals(&builder, &data);
+
   let gl_area = builder.get_object::<gtk::GLArea>("gl-area")
     .expect("Cannot get gl area!");
 
-  let record_toggle = builder.get_object::<gtk::ToggleButton>("record-toggle")
-    .expect("Cannot get record toggle");
-  let sample_length_spin = builder.get_object::<gtk::Adjustment>("sample-length")
-    .expect("Cannot get sampler spinner");
-  let sample_skip_spin = builder.get_object::<gtk::Adjustment>("sample-skip")
-    .expect("Cannot get sampler spinner");
-  let gain_slider = builder.get_object::<gtk::Adjustment>("gain")
-    .expect("Cannot get gain slider");
-  let alpha_slider = builder.get_object::<gtk::Adjustment>("alpha")
-    .expect("Cannot get gain slider");
-
-  {
-    let data = data.clone();
-    record_toggle.connect_toggled(move |record_toggle| {
-      let mut data = data.lock().unwrap();
-      data.record = record_toggle.get_active();
-    });
-  }
-  {
-    let data = data.clone();
-    sample_skip_spin.connect_value_changed(move |adj| {
-      let mut data = data.lock().unwrap();
-      data.skip = adj.get_value() as usize;
-    });
-  }
-  {
-    let data = data.clone();
-    sample_length_spin.connect_value_changed(move |adj| {
-      let mut data = data.lock().unwrap();
-      data.length = adj.get_value() as usize;
-      let mut samples = data.samples.lock().unwrap();
-      samples.resize(data.length, 0.0);
-    });
-  }
-  {
-    let data = data.clone();
-    gain_slider.connect_value_changed(move |adj| {
-      let mut data = data.lock().unwrap();
-      data.gain = adj.get_value() as f32;
-    });
-  }
-  {
-    let gl_area = gl_area.clone();
-    let style_context = style_context.clone();
-    alpha_slider.connect_value_changed(move |adj| {
-      let v = adj.get_value() as f32;
-      gl_area.make_current(); 
-      unsafe { gl::ClearColor(0.0, 0.0, 0.0, v) };
-      if 1.0 == v {
-        gl_area.set_has_alpha(false);
-        style_context.remove_class("transparent");
-      } else {
-        gl_area.set_has_alpha(true);
-        style_context.add_class("transparent");
-      }
-    });
-  }
   {
     let data = data.clone();
     reverse_action.connect_change_state(move |action, state| {
@@ -246,6 +214,9 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   let scope_amp_attr: Arc<Mutex<GLuint>> = Arc::new(Mutex::new(0));
   let scope_len_uni: Arc<Mutex<GLint>> = Arc::new(Mutex::new(0));
 
+  let scope_low_col_uni: Arc<Mutex<GLint>> = Arc::new(Mutex::new(0));
+  let scope_high_col_uni: Arc<Mutex<GLint>> = Arc::new(Mutex::new(0));
+
   let scope_program: Arc<Mutex<GLuint>> = Arc::new(Mutex::new(0));
 
   {
@@ -253,6 +224,8 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
     let scope_varray = scope_varray.clone();
     let scope_amp_attr = scope_amp_attr.clone();
     let scope_len_uni = scope_len_uni.clone();
+    let scope_low_col_uni = scope_low_col_uni.clone();
+    let scope_high_col_uni = scope_high_col_uni.clone();
     let scope_program = scope_program.clone();
 
     gl_area.connect_realize(move |gl_area| {
@@ -262,6 +235,8 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
       let mut scope_varray = scope_varray.lock().unwrap();
       let mut scope_amp_attr = scope_amp_attr.lock().unwrap();
       let mut scope_len_uni = scope_len_uni.lock().unwrap();
+      let mut scope_low_col_uni = scope_low_col_uni.lock().unwrap();
+      let mut scope_high_col_uni = scope_high_col_uni.lock().unwrap();
       let mut scope_program = scope_program.lock().unwrap();
 
       // TODO Fail good!
@@ -277,6 +252,8 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
 
         *scope_amp_attr = gl::GetAttribLocation(*scope_program, "amplitude\0".as_ptr() as *const GLchar) as GLuint;
         *scope_len_uni = gl::GetUniformLocation(*scope_program, "vert_count\0".as_ptr() as *const GLchar);
+        *scope_low_col_uni = gl::GetUniformLocation(*scope_program, "low_colour\0".as_ptr() as *const GLchar);
+        *scope_high_col_uni = gl::GetUniformLocation(*scope_program, "high_colour\0".as_ptr() as *const GLchar);
 
         gl::GenVertexArrays(1, &mut *scope_varray);
         gl::BindVertexArray(*scope_varray);
@@ -296,6 +273,7 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
   {
     let scope_len_uni = scope_len_uni.clone();
     let data = data.clone();
+    let background_colour = background_colour.clone();
     gl_area.connect_render(move |gl_area, _| {
       let scope_len_uni = scope_len_uni.lock().unwrap();
 
@@ -315,16 +293,74 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
           verts.extend_from_slice(v1);
         }
         if data.reverse { verts.reverse() };
-        verts
+        let freqs = {
+          use dft::*;
+          use dft::Operation::*;
+          let mut input = {
+            let l: usize = (10.0 as f32).exp2() as usize;
+            let mut input = Vec::with_capacity(l);
+            input.resize(l, 0.0);
+            for (i, s) in input.iter_mut().zip(samples.lock().unwrap().iter().cycle()) {
+              *i = *s as f64;
+              //println!("{}", s);
+            }
+            //.map(|&v| v as f64).collect::<Vec<_>>();
+            input
+          };
+          let plan = Plan::new(Forward, input.len());
+          transform(&mut input, &plan);
+          let mut out = unpack(&input).iter().map(|&v| v.norm().log10() as f32).collect::<Vec<_>>();
+          out.split_off((input.len() / 2));
+          out
+        };
+        
+        let mut top_freq = 0.0;
+        let mut top_freq_v = 0.0;
+        
+        for (i, v) in freqs.iter().enumerate() {
+          if v >= &top_freq_v {
+            top_freq = i as f32 * data.rate as f32 / freqs.len() as f32;
+            top_freq_v = *v as f32;
+          }
+        }
+        /*println!("top: {} Hz at {}", top_freq, top_freq_v);
+        if(top_freq_v != 0.0) {
+          for v in freqs.iter_mut() {
+            *v = *v / top_freq_v;
+          }
+        }*/
+        
+        //verts
+        freqs
       };
 
       gl_area.make_current();
+      if *colour_outdated.lock().unwrap() {
+        let lc = low_colour.lock().unwrap();
+        let hc = high_colour.lock().unwrap();
+        let bc = background_colour.lock().unwrap();
+        // TODO Only update on change
+        if 1.0 == lc.alpha && 1.0 == hc.alpha && 1.0 == bc.alpha {
+          gl_area.set_has_alpha(false);
+          style_context.remove_class("transparent");
+        } else {
+          gl_area.set_has_alpha(true);
+          style_context.add_class("transparent");
+        }
+        let scope_low_col_uni = scope_low_col_uni.lock().unwrap();
+        let scope_high_col_uni = scope_high_col_uni.lock().unwrap();
+        unsafe {
+          gl::Uniform4f(*scope_low_col_uni, lc.red as f32, lc.green as f32, lc.blue as f32, lc.alpha as f32);
+          gl::Uniform4f(*scope_high_col_uni, hc.red as f32, hc.green as f32, hc.blue as f32, hc.alpha as f32);
+          gl::ClearColor(bc.red as f32, bc.green as f32, bc.blue as f32, bc.alpha as f32)
+        };
+      }
       unsafe {
         gl::Clear(epoxy::COLOR_BUFFER_BIT);
         // TODO More efficient? Mapped memory?
         if data.samples_outdated {
           gl::BufferData(epoxy::ARRAY_BUFFER, (verts.len() * mem::size_of::<f32>()) as GLsizeiptr,
-          verts.as_ptr() as *const std::os::raw::c_void, epoxy::STREAM_DRAW);
+          verts.as_ptr() as *const GLvoid, epoxy::STREAM_DRAW);
           gl::Uniform1i(*scope_len_uni, verts.len() as GLint);
           data.samples_outdated = false;
         }
@@ -335,7 +371,10 @@ fn activate(app: &gtk::Application, client: &JackClient, data: Arc<Mutex<Callbac
     });
   }
 
+        println!("Yolo");
   win.show_all();
+  //win.show();
+        println!("Yolu");
 
   {
     let data = data.clone();
@@ -439,5 +478,46 @@ fn create_program(shaders: Vec<GLuint>) -> Result<GLuint, String> {
     }
 
     Ok(program)
+  }
+}
+
+fn connect_ui_signals(builder: &gtk::Builder, data: &std::sync::Arc<std::sync::Mutex<CallbackData>>) {
+  {
+    let data = data.clone();
+    let record_toggle = builder.get_object::<gtk::ToggleButton>("record-toggle")
+      .expect("Cannot get record toggle");
+    record_toggle.connect_toggled(move |record_toggle| {
+      let mut data = data.lock().unwrap();
+      data.record = record_toggle.get_active();
+    });
+  }
+  {
+    let data = data.clone();
+    let sample_skip_spin = builder.get_object::<gtk::Adjustment>("sample-skip")
+      .expect("Cannot get sampler spinner");
+    sample_skip_spin.connect_value_changed(move |adj| {
+      let mut data = data.lock().unwrap();
+      data.skip = adj.get_value() as usize;
+    });
+  }
+  {
+    let data = data.clone();
+    let sample_length_spin = builder.get_object::<gtk::SpinButton>("sample-length-spin")
+      .expect("Cannot get sampler spinner");
+    sample_length_spin.connect_value_changed(move |adj| {
+      let mut data = data.lock().unwrap();
+      data.length = adj.get_value().exp2() as usize;
+      let mut samples = data.samples.lock().unwrap();
+      samples.resize(data.length, 0.0);
+    });
+  }
+  {
+    let data = data.clone();
+    let gain_slider = builder.get_object::<gtk::Adjustment>("gain")
+      .expect("Cannot get gain slider");
+    gain_slider.connect_value_changed(move |adj| {
+      let mut data = data.lock().unwrap();
+      data.gain = adj.get_value() as f32;
+    });
   }
 }
